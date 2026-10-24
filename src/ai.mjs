@@ -70,16 +70,23 @@ async function askModel(provider, key, model, text) {
   if (!key) throw new Error('API key is not set.');
   if (!model) throw new Error('Model is not selected.');
   if (provider === 'groq') {
-    const body = await fetchJson(`${GROQ_BASE}/chat/completions`, {
+    const request = (jsonMode) => fetchJson(`${GROQ_BASE}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
         messages: [{ role: 'user', content: text }],
-        response_format: { type: 'json_object' },
+        ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
         temperature: 0.7,
       }),
     });
+    let body;
+    try { body = await request(true); } catch (error) {
+      // JSON mode sometimes rejects the model's own output ("Failed to validate JSON"); the prompt
+      // asks for JSON anyway, so one retry without it usually works.
+      if (error.status !== 400 || !/json/i.test(error.message)) throw error;
+      body = await request(false);
+    }
     return body?.choices?.[0]?.message?.content || '';
   }
   if (provider === 'gemini') {
@@ -137,8 +144,15 @@ async function resolve(item) {
   const year = Number.isInteger(item.year) ? item.year : Number.parseInt(item.year, 10) || null;
   for (const type of types) {
     for (const y of year ? [year, null] : [null]) {
-      const found = (await tmdbSearch(type, item.original_title.trim(), y))
-        .find((r) => r.poster_path && sameTitle(item.original_title, r));
+      // A search with the year is already filtered by TMDB, and it also finds titles the model wrote
+      // in another script (Pamfir / Памфір). Without the year, the title has to match and the year
+      // may differ by one at most, or a namesake from another decade slips in.
+      const found = (await tmdbSearch(type, item.original_title.trim(), y)).find((r) => {
+        if (!r.poster_path) return false;
+        if (y) return true;
+        const ry = Number.parseInt((r.release_date || r.first_air_date || '').slice(0, 4), 10);
+        return sameTitle(item.original_title, r) && (!year || (ry && Math.abs(ry - year) <= 1));
+      });
       if (!found) continue;
       if (!translated(found)) return null;
       const title = found.title || found.name || '';
