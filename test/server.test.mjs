@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = path.join(ROOT, 'src', 'server.mjs');
 const ACCEPT = 'application/json, text/event-stream';
 const VERSION = '2025-11-25';
+const APPROVAL = 'I have reviewed and approve changing the AI rows.';
 
 async function freePort() {
   const probe = http.createServer();
@@ -23,10 +24,11 @@ async function freePort() {
   return port;
 }
 
-async function launch(t, writes = false) {
+async function launch(t, writes = false, initial = null) {
   const port = await freePort();
   const dir = await mkdtemp(path.join(os.tmpdir(), 'lampac-mcp-test-'));
   const token = randomBytes(32).toString('hex');
+  if (initial) await writeFile(path.join(dir, 'collection.json'), JSON.stringify(initial));
   const child = spawn(process.execPath, [SERVER], {
     cwd: ROOT,
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -107,61 +109,62 @@ test('Streamable HTTP initializes, lists tools, serves the plugin, and keeps wri
 
   const listing = await rpc(base, token, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const names = (await listing.json()).result.tools.map((tool) => tool.name);
-  assert.deepEqual(names, ['get_ai_collection', 'replace_ai_collection', 'inspect_title_sources', 'get_tvctl_log']);
+  assert.deepEqual(names, ['get_ai_rows', 'set_ai_row', 'delete_ai_row', 'inspect_title_sources', 'get_tvctl_log']);
 
-  const read = await rpc(base, token, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_ai_collection', arguments: {} } });
-  assert.equal((await read.json()).result.structuredContent.title, 'AI picks');
+  const read = await rpc(base, token, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_ai_rows', arguments: {} } });
+  assert.deepEqual((await read.json()).result.structuredContent.rows, []);
 
   const write = await rpc(base, token, {
     jsonrpc: '2.0', id: 4, method: 'tools/call',
-    params: { name: 'replace_ai_collection', arguments: { title: 'Picks', items: [], approval_phrase: 'I have reviewed and approve replacing the AI collection.' } },
+    params: { name: 'set_ai_row', arguments: { id: 'picks', title: 'Picks', kind: 'movies', style: 'poster', items: [], approval_phrase: APPROVAL } },
   });
   assert.equal((await write.json()).result.isError, true);
 
   const plugin = await fetch(`${base}/plugin.js`);
   assert.equal(plugin.status, 200);
-  assert.match(await plugin.text(), /ContentRows\.add/);
+  assert.match(await plugin.text(), /sources\.tmdb/);
 
   const feed = await fetch(`${base}/api/collection`, { headers: { Origin: 'https://lampa.example' } });
   assert.equal(feed.status, 200);
   assert.equal(feed.headers.get('access-control-allow-origin'), '*');
 });
 
-test('approved collection replacement persists only normalized card fields', async (t) => {
+test('approved row writes keep order, normalize cards and support delete', async (t) => {
   const { base, token } = await launch(t, true);
-  const response = await rpc(base, token, {
-    jsonrpc: '2.0', id: 1, method: 'tools/call',
-    params: {
-      name: 'replace_ai_collection',
-      arguments: {
-        title: 'Weekend picks',
-        items: [{ id: 42, media_type: 'movie', title: 'Example', unexpected: 'discard me' }],
-        approval_phrase: 'I have reviewed and approve replacing the AI collection.',
-      },
-    },
-  });
-  const result = (await response.json()).result;
-  assert.equal(result.isError, true);
+  const call = async (name, args) => (await (await rpc(base, token, {
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args },
+  })).json()).result;
 
-  const valid = await rpc(base, token, {
-    jsonrpc: '2.0', id: 2, method: 'tools/call',
-    params: {
-      name: 'replace_ai_collection',
-      arguments: {
-        title: 'Weekend picks',
-        items: [{ id: 42, media_type: 'movie', title: 'Example', poster_path: '/poster.jpg' }],
-        approval_phrase: 'I have reviewed and approve replacing the AI collection.',
-      },
-    },
+  const bad = await call('set_ai_row', {
+    id: 'films', title: 'Films', kind: 'movies', style: 'poster', approval_phrase: APPROVAL,
+    items: [{ id: 42, media_type: 'movie', title: 'Example', unexpected: 'discard me' }],
   });
-  assert.deepEqual((await valid.json()).result.structuredContent, { ok: true, title: 'Weekend picks', items: 1 });
+  assert.equal(bad.isError, true);
 
-  const feed = await fetch(`${base}/api/collection`);
-  const collection = await feed.json();
-  assert.equal(collection.title, 'Weekend picks');
-  assert.deepEqual(collection.items[0], {
-    id: 42, media_type: 'movie', title: 'Example', source: 'tmdb', poster_path: '/poster.jpg',
+  const films = await call('set_ai_row', {
+    id: 'films', title: 'Films', kind: 'movies', style: 'poster', approval_phrase: APPROVAL,
+    items: [{ id: 42, media_type: 'movie', title: 'Example', poster_path: '/poster.jpg' }],
   });
+  assert.deepEqual(films.structuredContent, { ok: true, id: 'films', position: 0, items: 1, rows: 1 });
+  await call('set_ai_row', { id: 'series', title: 'Series', kind: 'series', style: 'wide', items: [], approval_phrase: APPROVAL });
+  const moved = await call('set_ai_row', { id: 'series', title: 'Series', kind: 'series', style: 'wide', position: 0, items: [], approval_phrase: APPROVAL });
+  assert.equal(moved.structuredContent.position, 0);
+
+  let feed = await (await fetch(`${base}/api/collection`)).json();
+  assert.deepEqual(feed.rows.map((r) => [r.id, r.kind, r.style]), [['series', 'series', 'wide'], ['films', 'movies', 'poster']]);
+  assert.equal(feed.title, 'Series');
+  assert.deepEqual(feed.rows[1].items[0], { id: 42, media_type: 'movie', title: 'Example', source: 'tmdb', poster_path: '/poster.jpg' });
+
+  assert.equal((await call('delete_ai_row', { id: 'series', approval_phrase: APPROVAL })).structuredContent.rows, 1);
+  feed = await (await fetch(`${base}/api/collection`)).json();
+  assert.deepEqual(feed.rows.map((r) => r.id), ['films']);
+});
+
+test('a collection file from the first alpha is read as one wide row', async (t) => {
+  const { base } = await launch(t, false, { title: 'Old picks', items: [{ id: 7, media_type: 'tv', title: 'Old', source: 'tmdb' }] });
+  const feed = await (await fetch(`${base}/api/collection`)).json();
+  assert.equal(feed.title, 'Old picks');
+  assert.deepEqual(feed.rows.map((r) => [r.id, r.style, r.items.length]), [['ai-picks', 'wide', 1]]);
 });
 
 test('local CUB stand-in answers without forwarding and logs paths only', async (t) => {
