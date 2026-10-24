@@ -2,13 +2,39 @@
 // Only titles TMDB knows (with a poster) end up in a row, so invented titles are dropped.
 
 const GEMINI_BASE = process.env.GEMINI_BASE || 'https://generativelanguage.googleapis.com/v1beta';
-const GROQ_BASE = process.env.GROQ_BASE || 'https://api.groq.com/openai/v1';
 const TMDB_BASE = (process.env.TMDB_BASE || (process.env.LAMPAC_URL ? `${process.env.LAMPAC_URL.replace(/\/+$/, '')}/tmdb/api/3` : 'https://api.themoviedb.org/3')).replace(/\/+$/, '');
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const TMDB_LANGUAGE = process.env.TMDB_LANGUAGE || 'uk-UA';
 const TIMEOUT = 45000;
+const MAX_OUTPUT = 2048;
 
-export const PROVIDERS = ['gemini', 'groq'];
+// Gemini has its own API; the rest speak the OpenAI chat-completions dialect. `base: null` means the
+// address is set in the cabinet (a local Ollama or any other compatible server).
+export const PROVIDER_INFO = {
+  gemini: { label: 'Gemini', key: true },
+  groq: { label: 'Groq', key: true, base: process.env.GROQ_BASE || 'https://api.groq.com/openai/v1' },
+  openrouter: { label: 'OpenRouter', key: true, base: process.env.OPENROUTER_BASE || 'https://openrouter.ai/api/v1' },
+  mistral: { label: 'Mistral', key: true, base: process.env.MISTRAL_BASE || 'https://api.mistral.ai/v1' },
+  ollama: { label: 'Ollama', key: false, base: null, example: 'http://localhost:11434/v1' },
+  custom: { label: 'Інший (OpenAI-сумісний)', key: false, base: null, example: 'https://llm.example.org/v1' },
+};
+export const PROVIDERS = Object.keys(PROVIDER_INFO);
+
+function baseOf(provider, bases = {}) {
+  const base = PROVIDER_INFO[provider]?.base || bases[provider] || '';
+  if (!/^https?:\/\/[^\s]+$/.test(base)) throw new Error('Set the server address for this provider.');
+  return base.replace(/\/+$/, '');
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// How long the provider asked us to wait after a 429: retry-after header (seconds) or "try again in 1.2s / 195ms".
+function retryDelay(error) {
+  if (Number.isFinite(error.retryAfter)) return error.retryAfter * 1000;
+  const match = /try again in ([\d.]+)\s*(ms|s)/i.exec(error.message || '');
+  if (!match) return null;
+  return Number(match[1]) * (match[2].toLowerCase() === 'ms' ? 1 : 1000);
+}
 
 const KIND_HINT = {
   movies: 'live-action feature films (no animation)',
@@ -24,24 +50,24 @@ async function fetchJson(url, options = {}) {
   try { body = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
   if (!response.ok) {
     const message = body?.error?.message || body?.status_message || text.slice(0, 200) || response.statusText;
-    throw Object.assign(new Error(`HTTP ${response.status}: ${message}`), { status: response.status });
+    const retryAfter = Number.parseFloat(response.headers.get('retry-after') || '');
+    throw Object.assign(new Error(`HTTP ${response.status}: ${message}`), { status: response.status, retryAfter });
   }
   return body;
 }
 
-export async function listModels(provider, key) {
-  if (!key) throw new Error('API key is not set.');
-  if (provider === 'groq') {
-    const body = await fetchJson(`${GROQ_BASE}/models`, { headers: { Authorization: `Bearer ${key}` } });
-    return (body?.data || []).filter((m) => m.active !== false).map((m) => m.id).sort();
-  }
+export async function listModels(provider, key, bases) {
+  const info = PROVIDER_INFO[provider];
+  if (!info) throw new Error(`Unknown provider: ${provider}`);
+  if (info.key && !key) throw new Error('API key is not set.');
   if (provider === 'gemini') {
     const body = await fetchJson(`${GEMINI_BASE}/models?pageSize=200&key=${encodeURIComponent(key)}`);
     return (body?.models || [])
       .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
       .map((m) => m.name.replace(/^models\//, '')).sort();
   }
-  throw new Error(`Unknown provider: ${provider}`);
+  const body = await fetchJson(`${baseOf(provider, bases)}/models`, { headers: key ? { Authorization: `Bearer ${key}` } : {} });
+  return (body?.data || []).filter((m) => m.active !== false).map((m) => m.id).sort();
 }
 
 function prompt(idea, kind, count) {
@@ -66,41 +92,58 @@ function parseItems(text) {
   return items.filter((x) => x && typeof x.original_title === 'string' && x.original_title.trim());
 }
 
-async function askModel(provider, key, model, text) {
-  if (!key) throw new Error('API key is not set.');
+async function chat(provider, key, model, text, bases) {
+  const headers = { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) };
+  const limits = provider === 'groq'
+    // Groq: max_tokens is deprecated; gpt-oss models spend tokens on reasoning, "low" keeps a row under the free TPM
+    ? { max_completion_tokens: MAX_OUTPUT, ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : {}) }
+    : { max_tokens: MAX_OUTPUT };
+  const request = (jsonMode) => fetchJson(`${baseOf(provider, bases)}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: text }],
+      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+      temperature: 0.7,
+      ...limits,
+    }),
+  });
+  let body;
+  try { body = await request(true); } catch (error) {
+    // JSON mode sometimes rejects the model's own output ("Failed to validate JSON") or is not supported;
+    // the prompt asks for JSON anyway, so one retry without it usually works.
+    if (error.status !== 400) throw error;
+    body = await request(false);
+  }
+  return body?.choices?.[0]?.message?.content || '';
+}
+
+async function askModelOnce(provider, key, model, text, bases) {
+  const info = PROVIDER_INFO[provider];
+  if (!info) throw new Error(`Unknown provider: ${provider}`);
+  if (info.key && !key) throw new Error('API key is not set.');
   if (!model) throw new Error('Model is not selected.');
-  if (provider === 'groq') {
-    const request = (jsonMode) => fetchJson(`${GROQ_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: text }],
-        ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
-        temperature: 0.7,
-      }),
-    });
-    let body;
-    try { body = await request(true); } catch (error) {
-      // JSON mode sometimes rejects the model's own output ("Failed to validate JSON"); the prompt
-      // asks for JSON anyway, so one retry without it usually works.
-      if (error.status !== 400 || !/json/i.test(error.message)) throw error;
-      body = await request(false);
-    }
-    return body?.choices?.[0]?.message?.content || '';
+  if (provider !== 'gemini') return chat(provider, key, model, text, bases);
+  const body = await fetchJson(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text }] }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: MAX_OUTPUT },
+    }),
+  });
+  return (body?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+}
+
+// A short wait the provider itself asked for after 429 (per-minute limits), then one more try.
+async function askModel(provider, key, model, text, bases) {
+  try { return await askModelOnce(provider, key, model, text, bases); } catch (error) {
+    const wait = error.status === 429 ? retryDelay(error) : null;
+    if (wait === null || wait > 20000) throw error;
+    await sleep(wait + 250);
+    return askModelOnce(provider, key, model, text, bases);
   }
-  if (provider === 'gemini') {
-    const body = await fetchJson(`${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.7 },
-      }),
-    });
-    return (body?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
-  }
-  throw new Error(`Unknown provider: ${provider}`);
 }
 
 // Japanese kana, CJK ideographs, Hangul: a title in these scripts means TMDB has no Ukrainian translation.
@@ -175,7 +218,7 @@ async function resolve(item) {
   return null;
 }
 
-export async function generateRow({ provider, key, model, idea, kind, count }) {
+export async function generateRow({ provider, key, model, idea, kind, count, bases }) {
   if (!PROVIDERS.includes(provider)) throw new Error('Choose a provider.');
   if (typeof idea !== 'string' || !idea.trim() || idea.length > 1000) throw new Error('Describe the idea in up to 1000 characters.');
   if (!TMDB_API_KEY) throw new Error('TMDB_API_KEY is not configured on the server.');
@@ -185,7 +228,7 @@ export async function generateRow({ provider, key, model, idea, kind, count }) {
   let proposed;
   for (let attempt = 1; ; attempt++) {
     try {
-      proposed = parseItems(await askModel(provider, key, model, prompt(idea.trim(), kind, Math.ceil(want * 1.4))));
+      proposed = parseItems(await askModel(provider, key, model, prompt(idea.trim(), kind, Math.ceil(want * 1.4)), bases));
       break;
     } catch (error) {
       const badJson = error instanceof SyntaxError || /JSON/.test(error.message);
