@@ -2,7 +2,7 @@
 
 A client-neutral MCP server for [Lampa](https://github.com/yumata/lampa-source) behind
 [Lampac](https://github.com/lampac-nextgen/lampac). The rows of Lampa's main screen are curated by AI —
-from the web cabinet (an idea in plain words → Gemini or Groq proposes titles → TMDB confirms them) or by
+from the web cabinet (an idea in plain words → an LLM proposes titles → TMDB confirms them) or by
 an MCP client — and Lampa shows them instead of its usual TMDB rows. The same service can stand in for
 CUB, Lampa's cloud service, so that Lampa's CUB requests stay on your network.
 
@@ -33,9 +33,12 @@ Open `http://<host>:8787/cabinet/`. On first start there is one user `admin` wit
 `admin` (or `CABINET_ADMIN_PASSWORD`); until that default password is changed, the server refuses
 everything except changing it. More users can be added in the cabinet.
 
-- **AI providers:** Gemini (Google AI Studio key) and Groq. Keys are stored in `data/settings.json`
-  (mode 600) and never sent back to the browser; the model list comes from the provider.
-  Only the idea and the proposed titles go to the provider.
+- **AI providers:** Gemini (Google AI Studio key), and through one OpenAI-compatible client: Groq,
+  OpenRouter (with a free-only model filter), Mistral, a local Ollama (no key; nothing leaves your network)
+  or any other server with `/chat/completions`. Keys are stored in `data/settings.json` (mode 600) and never
+  sent back to the browser; the model list comes from the provider. Only the idea and the proposed titles go
+  to the provider. After a 429 the request is repeated once after the wait the provider asks for; output is
+  capped (Groq: `max_completion_tokens`, `reasoning_effort: low` for gpt-oss models).
 - **Generation:** the model proposes titles (original and English title, year, type); each one is looked
   up in TMDB with `TMDB_API_KEY`. Titles TMDB does not know, namesakes from another year and titles without
   a translation in `TMDB_LANGUAGE` are dropped. Cards without images get them from TMDB when the cabinet
