@@ -163,3 +163,24 @@ test('approved collection replacement persists only normalized card fields', asy
     id: 42, media_type: 'movie', title: 'Example', source: 'tmdb', poster_path: '/poster.jpg',
   });
 });
+
+test('local CUB stand-in answers without forwarding and logs paths only', async (t) => {
+  const { base } = await launch(t);
+
+  const discuss = await fetch(`${base}/cub/api/discuss/get/tv_209867/1/uk`);
+  assert.equal(discuss.status, 404);
+
+  const plugin = await fetch(`${base}/cub/plugin/shots`);
+  assert.equal(plugin.status, 200);
+  assert.match(plugin.headers.get('content-type'), /javascript/);
+
+  const logs = await fetch(`${base}/cub/api/lampa/logs/write`, { method: 'POST', body: 'x'.repeat(2048) });
+  assert.equal(logs.status, 200);
+  assert.deepEqual(await logs.json(), { secuses: true });
+
+  await fetch(`${base}/cub/api/reactions/get/movie_1?uid=device-secret`);
+  const log = await (await fetch(`${base}/api/cub-log`)).json();
+  const paths = log.requests.map((r) => r.path);
+  assert.deepEqual(paths, ['/api/discuss/get/tv_209867/1/uk', '/plugin/shots', '/api/lampa/logs/write', '/api/reactions/get/movie_1']);
+  assert.equal(JSON.stringify(log).includes('device-secret'), false);
+});
