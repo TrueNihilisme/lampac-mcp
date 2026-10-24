@@ -153,7 +153,7 @@ route and returns at most 200 lines. Do not put the password in source control, 
 | `TMDB_IMG_BASE` | `<LAMPAC_URL>/tmdb/img/t/p/` or `https://image.tmdb.org/t/p/` | Poster base for the cabinet |
 | `TMDB_LANGUAGE` | `uk-UA` | Language of titles and the translation check |
 | `CABINET_ADMIN_PASSWORD` | none (`admin`) | Password of the first user on first start |
-| `CABINET_HOSTS` | none (any) | Comma-separated `Host` values the cabinet answers to, e.g. `192.168.1.10:8787,lampa-ai.example.org` |
+| `CABINET_HOSTS` | none (any) | Comma-separated `Host` values the cabinet answers to, e.g. `10.0.0.5:8787,lampa-ai.example.org` |
 
 ## Protocol and safety notes
 
