@@ -50,7 +50,7 @@ function prompt(idea, kind, count) {
     `Request from the owner (any language): ${JSON.stringify(idea)}`,
     `Row type: ${KIND_HINT[kind] || 'films and series'}.`,
     `Suggest ${count} real titles that exist in TMDB and fit the request. No duplicates, no titles you are unsure exist.`,
-    'Answer with JSON only: {"items":[{"original_title":"title in the original language or English","year":2020,"type":"movie"|"tv"}]}',
+    'Answer with JSON only: {"items":[{"original_title":"exactly as TMDB original_title: original language and script","english_title":"English title","year":2020,"type":"movie"|"tv"}]}',
   ].join('\n');
 }
 
@@ -137,35 +137,39 @@ async function tmdbSearch(type, title, year) {
   return body?.results || [];
 }
 
-// One proposed title -> one TMDB card, or null. Tries the proposed type first, then the other one,
-// and without the year when the model got it slightly wrong.
+// One proposed title -> one TMDB card, or null. Tries the original and the English title, the proposed
+// type first, then the other one, and without the year when the model got it slightly wrong.
 async function resolve(item) {
   const types = item.type === 'tv' ? ['tv', 'movie'] : ['movie', 'tv'];
   const year = Number.isInteger(item.year) ? item.year : Number.parseInt(item.year, 10) || null;
-  for (const type of types) {
-    for (const y of year ? [year, null] : [null]) {
-      // A search with the year is already filtered by TMDB, and it also finds titles the model wrote
-      // in another script (Pamfir / Памфір). Without the year, the title has to match and the year
-      // may differ by one at most, or a namesake from another decade slips in.
-      const found = (await tmdbSearch(type, item.original_title.trim(), y)).find((r) => {
-        if (!r.poster_path) return false;
-        if (y) return true;
-        const ry = Number.parseInt((r.release_date || r.first_air_date || '').slice(0, 4), 10);
-        return sameTitle(item.original_title, r) && (!year || (ry && Math.abs(ry - year) <= 1));
-      });
-      if (!found) continue;
-      if (!translated(found)) return null;
-      const title = found.title || found.name || '';
-      return {
-        id: found.id,
-        media_type: type,
-        title,
-        original_title: found.original_title || found.original_name || '',
-        poster_path: found.poster_path,
-        backdrop_path: found.backdrop_path || undefined,
-        year: (found.release_date || found.first_air_date || '').slice(0, 4),
-        vote_average: typeof found.vote_average === 'number' ? found.vote_average : undefined,
-      };
+  const queries = [...new Set([item.original_title, item.english_title].filter((q) => typeof q === 'string' && q.trim()).map((q) => q.trim()))];
+  const yearOk = (r) => {
+    const ry = Number.parseInt((r.release_date || r.first_air_date || '').slice(0, 4), 10);
+    return !year || (ry && Math.abs(ry - year) <= 1);
+  };
+  // With the year, TMDB has already filtered the results and finds titles written in another script
+  // (Pamfir / Памфір): prefer a result whose title matches, else take the first one. Without the year,
+  // the title has to match and the year may differ by one at most, or a namesake from another decade slips in.
+  for (const y of year ? [year, null] : [null]) {
+    for (const query of queries) {
+      for (const type of types) {
+        const results = (await tmdbSearch(type, query, y)).filter((r) => r.poster_path);
+        const found = y
+          ? results.find((r) => sameTitle(query, r)) || results[0]
+          : results.find((r) => sameTitle(query, r) && yearOk(r));
+        if (!found) continue;
+        if (!translated(found)) return null;
+        return {
+          id: found.id,
+          media_type: type,
+          title: found.title || found.name || '',
+          original_title: found.original_title || found.original_name || '',
+          poster_path: found.poster_path,
+          backdrop_path: found.backdrop_path || undefined,
+          year: (found.release_date || found.first_air_date || '').slice(0, 4),
+          vote_average: typeof found.vote_average === 'number' ? found.vote_average : undefined,
+        };
+      }
     }
   }
   return null;
@@ -177,7 +181,17 @@ export async function generateRow({ provider, key, model, idea, kind, count }) {
   if (!TMDB_API_KEY) throw new Error('TMDB_API_KEY is not configured on the server.');
   const want = Math.min(Math.max(Number.parseInt(count, 10) || 15, 5), 30);
   // ask for a few more: some proposals are not found in TMDB
-  const proposed = parseItems(await askModel(provider, key, model, prompt(idea.trim(), kind, Math.ceil(want * 1.4))));
+  // models now and then answer with broken JSON: one more try before giving up
+  let proposed;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      proposed = parseItems(await askModel(provider, key, model, prompt(idea.trim(), kind, Math.ceil(want * 1.4))));
+      break;
+    } catch (error) {
+      const badJson = error instanceof SyntaxError || /JSON/.test(error.message);
+      if (!badJson || attempt >= 2) throw error;
+    }
+  }
   const items = [];
   const skipped = [];
   const seen = new Set();
