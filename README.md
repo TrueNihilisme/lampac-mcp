@@ -1,9 +1,12 @@
 # lampac-mcp (Alpha)
 
 A client-neutral MCP server for [Lampa](https://github.com/yumata/lampa-source) behind
-[Lampac](https://github.com/lampac-nextgen/lampac). An MCP client (an AI assistant) curates the rows of
-Lampa's main screen; Lampa shows them instead of its usual TMDB rows. The same service can stand in for
+[Lampac](https://github.com/lampac-nextgen/lampac). The rows of Lampa's main screen are curated by AI —
+from the web cabinet (an idea in plain words → Gemini or Groq proposes titles → TMDB confirms them) or by
+an MCP client — and Lampa shows them instead of its usual TMDB rows. The same service can stand in for
 CUB, Lampa's cloud service, so that Lampa's CUB requests stay on your network.
+
+![Cabinet](docs/cabinet.jpg)
 
 Rows are stored by this service as JSON. It does not write to CUB, Lampac `catalog/card`, or Lampa's own data.
 
@@ -21,6 +24,27 @@ Rows are stored by this service as JSON. It does not write to CUB, Lampac `catal
   for older plugin builds.
 - `/cub/*` — local CUB stand-in (see below) and `GET /api/cub-log` with the last requested paths.
 - `plugin/lampac-mcp.js` — Lampa 3 plugin that builds the main screen from the rows.
+- `/cabinet` — web cabinet (Ukrainian UI): rows (order, edit, delete, regenerate from the stored idea),
+  new rows from an idea, AI provider keys and models, MCP token, users, CUB log.
+
+## Cabinet
+
+Open `http://<host>:8787/cabinet/`. On first start there is one user `admin` with the password
+`admin` (or `CABINET_ADMIN_PASSWORD`); until that default password is changed, the server refuses
+everything except changing it. More users can be added in the cabinet.
+
+- **AI providers:** Gemini (Google AI Studio key) and Groq. Keys are stored in `data/settings.json`
+  (mode 600) and never sent back to the browser; the model list comes from the provider.
+  Only the idea and the proposed titles go to the provider.
+- **Generation:** the model proposes titles (original and English title, year, type); each one is looked
+  up in TMDB with `TMDB_API_KEY`. Titles TMDB does not know, namesakes from another year and titles without
+  a translation in `TMDB_LANGUAGE` are dropped. Cards without images get them from TMDB when the cabinet
+  shows the rows.
+- **MCP token:** "Issue a new token" replaces `MCP_TOKEN` at once; the token is shown once, with the
+  `claude mcp add --transport http …` command.
+- **Hardening:** sessions in `HttpOnly; SameSite=Strict` cookies, same-origin check on writes, login
+  attempts limited, `Content-Security-Policy` without inline scripts, optional `CABINET_HOSTS` allowlist
+  against DNS rebinding. Keep the cabinet on a trusted network or behind your own login.
 
 ## Run
 
@@ -122,8 +146,14 @@ route and returns at most 200 lines. Do not put the password in source control, 
 | `PORT` | `8787` | Listen port |
 | `LAMPAC_URL` | none | Lampac base URL for source inspection |
 | `LAMPAC_ROOT_PASSWORD` | none | Lampac root password for optional read-only EX.TvCtl log access |
-| `MCP_ENABLE_WRITES` | `false` | Enables `set_ai_row` and `delete_ai_row` |
-| `COLLECTIONS_FILE` | `./data/collections.json` | JSON persistence path |
+| `MCP_ENABLE_WRITES` | `false` | Enables `set_ai_row` and `delete_ai_row` over MCP (the cabinet can always edit rows) |
+| `COLLECTIONS_FILE` | `./data/collections.json` | JSON persistence path; `users.json` and `settings.json` live next to it |
+| `TMDB_API_KEY` | none | TMDB key for row generation and card images in the cabinet |
+| `TMDB_BASE` | `<LAMPAC_URL>/tmdb/api/3` if `LAMPAC_URL` is set, else `https://api.themoviedb.org/3` | TMDB API base (Lampac's TMDB proxy works) |
+| `TMDB_IMG_BASE` | `<LAMPAC_URL>/tmdb/img/t/p/` or `https://image.tmdb.org/t/p/` | Poster base for the cabinet |
+| `TMDB_LANGUAGE` | `uk-UA` | Language of titles and the translation check |
+| `CABINET_ADMIN_PASSWORD` | none (`admin`) | Password of the first user on first start |
+| `CABINET_HOSTS` | none (any) | Comma-separated `Host` values the cabinet answers to, e.g. `192.168.1.10:8787,lampa-ai.example.org` |
 
 ## Protocol and safety notes
 
