@@ -1,0 +1,15 @@
+{
+  "name": "lampac-mcp-alpha",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Client-neutral MCP tools and an AI-managed Lampa carousel prototype",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  }
+}
