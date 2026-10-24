@@ -30,6 +30,7 @@ async function fakes(t) {
       { original_title: 'Real Movie', year: 2020, type: 'movie' },
       { original_title: 'Invented Title', year: 2021, type: 'movie' },
       { original_title: 'Real Show', year: 2019, type: 'tv' },
+      { original_title: 'Lookalike', year: 2018, type: 'movie' },
     ] });
     if (url.pathname === '/groq/models') return send({ data: [{ id: 'model-b' }, { id: 'model-a' }] });
     if (url.pathname === '/groq/chat/completions') return send({ choices: [{ message: { content: proposal } }] });
@@ -40,6 +41,7 @@ async function fakes(t) {
     if (url.pathname.startsWith('/tmdb/search/')) {
       const q = url.searchParams.get('query');
       if (q === 'Real Movie' && url.pathname.endsWith('/movie')) return send({ results: [{ id: 11, title: 'Справжній фільм', original_title: 'Real Movie', poster_path: '/m.jpg', release_date: '2020-05-01' }] });
+      if (q === 'Lookalike') return send({ results: [{ id: 33, title: 'Зовсім інше', original_title: 'Something Else', poster_path: '/x.jpg' }] });
       if (q === 'Real Show' && url.pathname.endsWith('/tv')) return send({ results: [{ id: 22, name: 'Справжній серіал', original_name: 'Real Show', poster_path: '/s.jpg', first_air_date: '2019-01-01' }] });
       return send({ results: [] });
     }
@@ -139,7 +141,7 @@ test('cabinet: keys stay on the server, generation drops invented titles, rows s
     const gen = await call('POST', '/generate', { idea: 'cosy autumn films', kind: 'movies', count: 5, provider });
     assert.equal(gen.status, 200, JSON.stringify(gen.body));
     assert.deepEqual(gen.body.items.map((x) => [x.media_type, x.id, x.title]), [['movie', 11, 'Справжній фільм'], ['tv', 22, 'Справжній серіал']]);
-    assert.deepEqual(gen.body.skipped, ['Invented Title']);
+    assert.deepEqual(gen.body.skipped, ['Invented Title', 'Lookalike']);
   }
 
   const gen = await call('POST', '/generate', { idea: 'cosy autumn films', kind: 'movies', count: 5 });

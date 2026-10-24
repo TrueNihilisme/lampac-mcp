@@ -96,7 +96,32 @@ async function askModel(provider, key, model, text) {
   throw new Error(`Unknown provider: ${provider}`);
 }
 
+// Japanese kana, CJK ideographs, Hangul: a title in these scripts means TMDB has no Ukrainian translation.
 const CJK = /[぀-ヿ㐀-鿿가-힯]/;
+
+const words = (text) => String(text || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
+  .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').filter(Boolean);
+
+// TMDB search returns something for almost any query; keep a result only when its original or
+// localized title shares most words with the proposed one.
+function sameTitle(proposed, result) {
+  const want = words(proposed);
+  if (!want.length) return false;
+  return [result.original_title, result.original_name, result.title, result.name].some((candidate) => {
+    const have = new Set(words(candidate));
+    if (!have.size) return false;
+    const common = want.filter((w) => have.has(w)).length;
+    return common / Math.max(want.length, have.size) >= 0.6;
+  });
+}
+
+// Lampa shows the localized title; a foreign title TMDB has not translated is no use on the main screen.
+function translated(result) {
+  const title = result.title || result.name || '';
+  const original = result.original_title || result.original_name || '';
+  if (!title || CJK.test(title)) return false;
+  return ['en', 'uk'].includes(result.original_language) || title !== original;
+}
 
 async function tmdbSearch(type, title, year) {
   const params = new URLSearchParams({ api_key: TMDB_API_KEY, language: TMDB_LANGUAGE, query: title });
@@ -112,10 +137,11 @@ async function resolve(item) {
   const year = Number.isInteger(item.year) ? item.year : Number.parseInt(item.year, 10) || null;
   for (const type of types) {
     for (const y of year ? [year, null] : [null]) {
-      const found = (await tmdbSearch(type, item.original_title.trim(), y)).find((r) => r.poster_path);
+      const found = (await tmdbSearch(type, item.original_title.trim(), y))
+        .find((r) => r.poster_path && sameTitle(item.original_title, r));
       if (!found) continue;
+      if (!translated(found)) return null;
       const title = found.title || found.name || '';
-      if (!title || CJK.test(title)) return null;
       return {
         id: found.id,
         media_type: type,
