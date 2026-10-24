@@ -121,6 +121,10 @@ test('Streamable HTTP initializes, lists tools, serves the plugin, and keeps wri
   const plugin = await fetch(`${base}/plugin.js`);
   assert.equal(plugin.status, 200);
   assert.match(await plugin.text(), /ContentRows\.add/);
+
+  const feed = await fetch(`${base}/api/collection`, { headers: { Origin: 'https://lampa.example' } });
+  assert.equal(feed.status, 200);
+  assert.equal(feed.headers.get('access-control-allow-origin'), '*');
 });
 
 test('approved collection replacement persists only normalized card fields', async (t) => {

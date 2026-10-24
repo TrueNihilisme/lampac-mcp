@@ -347,7 +347,9 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost');
   try {
     if (url.pathname === MCP_PATH) return await handleMcp(req, res);
-    if (req.method === 'GET' && url.pathname === '/api/collection') return sendJson(res, 200, await readCollection());
+    if (req.method === 'GET' && url.pathname === '/api/collection') {
+      return sendJson(res, 200, await readCollection(), { 'Access-Control-Allow-Origin': '*' });
+    }
     if (req.method === 'GET' && url.pathname === '/plugin.js') {
       const script = await fs.readFile(path.join(ROOT, 'plugin', 'lampac-mcp.js'));
       return sendText(res, 200, script, 'application/javascript; charset=utf-8');
