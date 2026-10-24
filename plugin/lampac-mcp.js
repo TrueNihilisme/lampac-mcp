@@ -181,7 +181,11 @@
                     parts = rows.map(function (row) {
                         return function (call) { buildRow(row, call); };
                     });
-                    Lampa.ContentRows.call('main', params, parts);
+                    /* Rows of Lampa itself and other plugins ("Continue watching", recent and upcoming
+                       episodes) go after ours, at the very bottom: the user's choice. */
+                    var extra = [];
+                    Lampa.ContentRows.call('main', params, extra);
+                    parts = parts.concat(extra);
                     Lampa.Api.partNext(parts, PARTS_LIMIT, oncomplite, onerror);
                 }
                 if (pending) {
