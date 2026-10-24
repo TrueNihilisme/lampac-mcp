@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -343,10 +344,40 @@ async function handleMcp(req, res) {
   return sendJson(res, 200, response);
 }
 
+// Local stand-in for CUB (Lampa's cloud service). Lampac's CubProxy forwards Lampa's
+// /cub/red/<path> requests to `${cub.scheme}://${cub.domain}/<path>` from init.conf; pointing
+// cub.domain at <this server>/cub keeps every such request on the local network.
+// Lampa treats an error from these endpoints as "nothing there" (no comments block,
+// no reactions, no CUB collections), so 404 is the answer for almost everything.
+const CUB_PREFIX = '/cub/';
+const CUB_LOG_MAX = 200;
+const cubLog = [];
+
+async function handleCub(req, res, url) {
+  const route = url.pathname.slice(CUB_PREFIX.length - 1);
+  // Path only: query strings carry device ids and tokens.
+  cubLog.push({ time: new Date().toISOString(), method: req.method, path: route });
+  if (cubLog.length > CUB_LOG_MAX) cubLog.shift();
+
+  if (req.method === 'POST') {
+    // logs upload, reactions: accept and drop
+    req.resume();
+    await once(req, 'end');
+    return sendJson(res, 200, { secuses: true });
+  }
+  // Lampa loads these as <script>; an empty script avoids load errors on the device.
+  if (route.startsWith('/plugin/')) {
+    return sendText(res, 200, '/* local CUB stand-in: plugin not provided */', 'application/javascript; charset=utf-8');
+  }
+  return sendJson(res, 404, { secuses: false, error: 'Not provided by the local CUB stand-in' });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost');
   try {
     if (url.pathname === MCP_PATH) return await handleMcp(req, res);
+    if (url.pathname.startsWith(CUB_PREFIX)) return await handleCub(req, res, url);
+    if (req.method === 'GET' && url.pathname === '/api/cub-log') return sendJson(res, 200, { requests: cubLog });
     if (req.method === 'GET' && url.pathname === '/api/collection') {
       return sendJson(res, 200, await readCollection(), { 'Access-Control-Allow-Origin': '*' });
     }
