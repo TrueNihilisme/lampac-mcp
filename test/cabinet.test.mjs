@@ -41,7 +41,9 @@ async function fakes(t) {
     if (url.pathname.startsWith('/tmdb/search/')) {
       const q = url.searchParams.get('query');
       if (q === 'Real Movie' && url.pathname.endsWith('/movie')) return send({ results: [{ id: 11, title: 'Справжній фільм', original_title: 'Real Movie', poster_path: '/m.jpg', release_date: '2020-05-01' }] });
-      if (q === 'Lookalike') return send({ results: [{ id: 33, title: 'Зовсім інше', original_title: 'Something Else', poster_path: '/x.jpg' }] });
+      // a namesake from another decade, found only by the search without the year
+      if (q === 'Lookalike') return send({ results: url.searchParams.has('primary_release_year') || url.searchParams.has('first_air_date_year') ? []
+        : [{ id: 33, title: 'Двійник', original_title: 'Lookalike', poster_path: '/x.jpg', release_date: '1975-01-01' }] });
       if (q === 'Real Show' && url.pathname.endsWith('/tv')) return send({ results: [{ id: 22, name: 'Справжній серіал', original_name: 'Real Show', poster_path: '/s.jpg', first_air_date: '2019-01-01' }] });
       return send({ results: [] });
     }
