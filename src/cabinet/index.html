@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lampac-mcp · кабінет</title>
+<link rel="stylesheet" href="/cabinet/style.css">
+<link rel="icon" href="/cabinet/logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+<div id="login" class="login hidden">
+  <form class="blk" id="login-form" autocomplete="on">
+    <div class="logo">
+      <div class="m"><img src="/cabinet/logo.svg" alt="" width="19" height="19"></div>
+      <div><b>lampac-mcp</b><small>Ряди головної Lampa</small></div>
+    </div>
+    <label class="f" for="lu">Логін</label>
+    <input class="inp" id="lu" name="username" autocomplete="username" required>
+    <label class="f" for="lp">Пароль</label>
+    <input class="inp" id="lp" name="password" type="password" autocomplete="current-password" required>
+    <button class="btn pri" type="submit">Увійти</button>
+    <div class="msg bad" id="login-msg"></div>
+  </form>
+</div>
+
+<div id="app" class="win hidden">
+  <div class="bar">
+    <div class="logo">
+      <div class="m"><img src="/cabinet/logo.svg" alt="" width="19" height="19"></div>
+      <div><b>lampac-mcp</b><small>Ряди головної Lampa</small></div>
+    </div>
+    <div class="grow"></div>
+    <div class="st hide-s" id="status"><i></i><span>…</span></div>
+    <span class="mut hide-s" id="clock"></span>
+    <div class="av" id="avatar" title=""></div>
+    <button class="btn sm" data-act="logout">Вийти</button>
+  </div>
+  <div class="body">
+    <nav class="nav" id="nav">
+      <button class="ni on" data-view="home"><span class="ic">⌂</span>Головна</button>
+      <button class="ni" data-view="rows"><span class="ic">▤</span>Ряди<span class="c" id="nav-rows"></span></button>
+      <button class="ni" data-view="idea"><span class="ic">✦</span>Нова ідея</button>
+      <button class="ni" data-view="ai"><span class="ic">◈</span>ШІ-провайдер</button>
+      <button class="ni" data-view="mcp"><span class="ic">⌘</span>Доступ MCP</button>
+      <button class="ni" data-view="users"><span class="ic">◉</span>Користувачі</button>
+      <button class="ni" data-view="cub"><span class="ic">⛨</span>Журнал CUB<span class="c" id="nav-cub"></span></button>
+      <div class="foot">Ряди бачать усі пристрої з Lampa.<br>Зміни — після перезапуску Lampa.</div>
+    </nav>
+    <main class="main" id="main"></main>
+  </div>
+</div>
+
+<template id="hero-bg">
+  <svg class="bg" viewBox="0 0 1200 160" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+    <defs>
+      <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1b1446"/><stop offset=".55" stop-color="#3a2477"/><stop offset="1" stop-color="#7a3a7a"/>
+      </linearGradient>
+      <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#ff9a5a" stop-opacity="0"/><stop offset=".55" stop-color="#ff9a5a" stop-opacity=".55"/><stop offset="1" stop-color="#ff9a5a" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <rect width="1200" height="160" fill="url(#sky)"/>
+    <rect y="104" width="1200" height="14" fill="url(#glow)"/>
+    <g fill="#fff" opacity=".7">
+      <circle cx="620" cy="22" r="1.2"/><circle cx="760" cy="40" r="1"/><circle cx="880" cy="18" r="1.4"/><circle cx="1010" cy="34" r="1"/>
+      <circle cx="540" cy="48" r=".9"/><circle cx="1110" cy="20" r="1.1"/><circle cx="700" cy="12" r=".8"/><circle cx="960" cy="58" r=".9"/>
+    </g>
+    <path d="M0 160 L0 112 L90 84 L170 108 L260 70 L360 104 L450 78 L560 112 L660 74 L760 106 L860 66 L980 104 L1080 80 L1200 108 L1200 160Z" fill="#2a1d55" opacity=".9"/>
+    <path d="M0 160 L0 128 L120 104 L230 132 L340 100 L470 134 L590 106 L720 136 L850 102 L980 132 L1100 108 L1200 126 L1200 160Z" fill="#160f33"/>
+  </svg>
+</template>
+
+<script src="/cabinet/app.js"></script>
+</body>
+</html>

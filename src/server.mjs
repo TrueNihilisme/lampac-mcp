@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createCabinet } from './cabinet.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -86,13 +87,12 @@ function sendText(res, status, body, type = 'text/plain; charset=utf-8', extraHe
   res.end(bytes);
 }
 
-function tokenMatches(req) {
+// MCP_TOKEN from the environment, unless a new token was issued in the cabinet.
+async function tokenMatches(req) {
   const header = req.headers.authorization || '';
   const match = /^Bearer\s+(.+)$/i.exec(header);
   if (!match) return false;
-  const supplied = crypto.createHash('sha256').update(match[1]).digest();
-  const expected = crypto.createHash('sha256').update(TOKEN).digest();
-  return crypto.timingSafeEqual(supplied, expected);
+  return cabinet.tokenMatches(match[1]);
 }
 
 function originAllowed(req) {
@@ -307,36 +307,49 @@ function requireWrite(args, allowed) {
   if (typeof args.id !== 'string' || !ROW_ID.test(args.id)) throw new Error('Row id: lowercase letters, digits and dashes, up to 40 characters.');
 }
 
+// Shared by the MCP tools and the cabinet. `idea` keeps the request a row was generated from.
+async function setRow(args) {
+  if (typeof args.id !== 'string' || !ROW_ID.test(args.id)) throw new Error('Row id: lowercase letters, digits and dashes, up to 40 characters.');
+  if (typeof args.title !== 'string' || !args.title.trim() || args.title.length > 100) throw new Error('Provide a row title of at most 100 characters.');
+  if (!ROW_KINDS.includes(args.kind)) throw new Error(`kind must be one of: ${ROW_KINDS.join(', ')}.`);
+  if (!ROW_STYLES.includes(args.style)) throw new Error(`style must be one of: ${ROW_STYLES.join(', ')}.`);
+  if (!Array.isArray(args.items) || args.items.length > 100) throw new Error('Provide an array of at most 100 cards.');
+  if (args.idea !== undefined && (typeof args.idea !== 'string' || args.idea.length > 1000)) throw new Error('idea: text of at most 1000 characters.');
+  if (args.position !== undefined && (!Number.isInteger(args.position) || args.position < 0 || args.position >= MAX_ROWS)) {
+    throw new Error(`position must be an integer from 0 to ${MAX_ROWS - 1}.`);
+  }
+  const now = new Date().toISOString();
+  const row = { id: args.id, title: args.title.trim(), kind: args.kind, style: args.style, updated_at: now, items: normalizeItems(args.items) };
+  if (args.idea && args.idea.trim()) row.idea = args.idea.trim();
+  const data = await readRows();
+  const rows = data.rows.slice();
+  const index = rows.findIndex((r) => r.id === row.id);
+  if (index === -1 && rows.length >= MAX_ROWS) throw new Error(`At most ${MAX_ROWS} rows.`);
+  if (index !== -1) rows.splice(index, 1);
+  const at = args.position !== undefined ? Math.min(args.position, rows.length) : (index !== -1 ? index : rows.length);
+  rows.splice(at, 0, row);
+  await saveCollection({ updated_at: now, rows });
+  return { ok: true, id: row.id, position: at, items: row.items.length, rows: rows.length };
+}
+
+async function deleteRow(id) {
+  const data = await readRows();
+  const rows = data.rows.filter((r) => r.id !== id);
+  if (rows.length === data.rows.length) throw new Error(`No row with id ${id}.`);
+  await saveCollection({ updated_at: new Date().toISOString(), rows });
+  return { ok: true, id, rows: rows.length };
+}
+
 async function callTool(name, args) {
   if (name === 'get_ai_rows') return resultText(await readRows());
   if (name === 'set_ai_row') {
     requireWrite(args, ['id', 'title', 'kind', 'style', 'position', 'items', 'approval_phrase']);
-    if (typeof args.title !== 'string' || !args.title.trim() || args.title.length > 100) throw new Error('Provide a row title of at most 100 characters.');
-    if (!ROW_KINDS.includes(args.kind)) throw new Error(`kind must be one of: ${ROW_KINDS.join(', ')}.`);
-    if (!ROW_STYLES.includes(args.style)) throw new Error(`style must be one of: ${ROW_STYLES.join(', ')}.`);
-    if (!Array.isArray(args.items) || args.items.length > 100) throw new Error('Provide an array of at most 100 cards.');
-    if (args.position !== undefined && (!Number.isInteger(args.position) || args.position < 0 || args.position >= MAX_ROWS)) {
-      throw new Error(`position must be an integer from 0 to ${MAX_ROWS - 1}.`);
-    }
-    const now = new Date().toISOString();
-    const row = { id: args.id, title: args.title.trim(), kind: args.kind, style: args.style, updated_at: now, items: normalizeItems(args.items) };
-    const data = await readRows();
-    const rows = data.rows.slice();
-    const index = rows.findIndex((r) => r.id === row.id);
-    if (index === -1 && rows.length >= MAX_ROWS) throw new Error(`At most ${MAX_ROWS} rows.`);
-    if (index !== -1) rows.splice(index, 1);
-    const at = args.position !== undefined ? Math.min(args.position, rows.length) : (index !== -1 ? index : rows.length);
-    rows.splice(at, 0, row);
-    await saveCollection({ updated_at: now, rows });
-    return resultText({ ok: true, id: row.id, position: at, items: row.items.length, rows: rows.length });
+    const { approval_phrase: _, ...row } = args;
+    return resultText(await setRow(row));
   }
   if (name === 'delete_ai_row') {
     requireWrite(args, ['id', 'approval_phrase']);
-    const data = await readRows();
-    const rows = data.rows.filter((r) => r.id !== args.id);
-    if (rows.length === data.rows.length) throw new Error(`No row with id ${args.id}.`);
-    await saveCollection({ updated_at: new Date().toISOString(), rows });
-    return resultText({ ok: true, id: args.id, rows: rows.length });
+    return resultText(await deleteRow(args.id));
   }
   if (name === 'inspect_title_sources') return resultText(await diagnoseTitle(args));
   if (name === 'get_tvctl_log') {
@@ -385,7 +398,7 @@ async function handleRpc(message) {
 
 async function handleMcp(req, res) {
   if (!originAllowed(req)) return sendJson(res, 403, rpcError(undefined, -32000, 'Origin is not allowed.'));
-  if (!tokenMatches(req)) return sendJson(res, 401, { error: 'Unauthorized' }, { 'WWW-Authenticate': 'Bearer' });
+  if (!(await tokenMatches(req))) return sendJson(res, 401, { error: 'Unauthorized' }, { 'WWW-Authenticate': 'Bearer' });
   if (req.method === 'GET') return sendText(res, 405, 'Method Not Allowed', 'text/plain; charset=utf-8');
   if (req.method !== 'POST') return sendText(res, 405, 'Method Not Allowed', 'text/plain; charset=utf-8', { Allow: 'POST, GET' });
   const accept = req.headers.accept || '';
@@ -439,9 +452,16 @@ async function handleCub(req, res, url) {
   return sendJson(res, 404, { secuses: false, error: 'Not provided by the local CUB stand-in' });
 }
 
+const cabinet = createCabinet({
+  collectionFile: COLLECTION_FILE, envToken: TOKEN, cubLog, kinds: ROW_KINDS, styles: ROW_STYLES,
+  readRows, setRow, deleteRow, readBody, sendJson, sendText, saveRows: saveCollection,
+});
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost');
   try {
+    if (url.pathname === '/' && req.method === 'GET') return sendText(res, 302, '', 'text/plain; charset=utf-8', { Location: '/cabinet/' });
+    if (url.pathname === '/cabinet' || url.pathname.startsWith('/cabinet/')) return await cabinet.handle(req, res, url);
     if (url.pathname === MCP_PATH) return await handleMcp(req, res);
     if (url.pathname.startsWith(CUB_PREFIX)) return await handleCub(req, res, url);
     if (req.method === 'GET' && url.pathname === '/api/cub-log') return sendJson(res, 200, { requests: cubLog });
