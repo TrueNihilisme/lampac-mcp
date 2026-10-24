@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROVIDERS, fillImages, generateRow, listModels } from './ai.mjs';
+import { PROVIDERS, PROVIDER_INFO, fillImages, generateRow, listModels } from './ai.mjs';
 
 const STATIC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cabinet');
 const SESSION_COOKIE = 'lmcp_session';
@@ -147,8 +147,13 @@ export function createCabinet(ctx) {
     return {
       provider: ai.provider || '',
       models: ai.models || {},
+      bases: ai.bases || {},
       keys: Object.fromEntries(PROVIDERS.map((p) => [p, Boolean(ai.keys?.[p])])),
       providers: PROVIDERS,
+      info: Object.fromEntries(PROVIDERS.map((p) => [p, {
+        label: PROVIDER_INFO[p].label, key_required: PROVIDER_INFO[p].key, editable_base: !PROVIDER_INFO[p].base,
+        example: PROVIDER_INFO[p].example || '',
+      }])),
     };
   }
 
@@ -211,6 +216,7 @@ export function createCabinet(ctx) {
       const ai = settings.ai || (settings.ai = {});
       ai.keys = ai.keys || {};
       ai.models = ai.models || {};
+      ai.bases = ai.bases || {};
       if (input.provider !== undefined) {
         if (!PROVIDERS.includes(input.provider)) return json(400, { error: 'Невідомий провайдер.' });
         ai.provider = input.provider;
@@ -222,6 +228,11 @@ export function createCabinet(ctx) {
           if (key) ai.keys[p] = key; else delete ai.keys[p];
         }
         if (typeof input.models?.[p] === 'string') ai.models[p] = input.models[p].trim().slice(0, 120);
+        if (typeof input.bases?.[p] === 'string' && !PROVIDER_INFO[p].base) {
+          const base = input.bases[p].trim();
+          if (base && !/^https?:\/\/[^\s]{3,200}$/.test(base)) return json(400, { error: 'Адреса має починатися з http:// або https://' });
+          if (base) ai.bases[p] = base.replace(/\/+$/, ''); else delete ai.bases[p];
+        }
       }
       await saveSettings(settings);
       return json(200, aiView(settings));
@@ -230,7 +241,7 @@ export function createCabinet(ctx) {
       const { provider } = await body(req);
       const settings = await readSettings();
       if (!PROVIDERS.includes(provider)) return json(400, { error: 'Невідомий провайдер.' });
-      try { return json(200, { models: await listModels(provider, settings.ai?.keys?.[provider]) }); } catch (error) {
+      try { return json(200, { models: await listModels(provider, settings.ai?.keys?.[provider], settings.ai?.bases) }); } catch (error) {
         return json(502, { error: `Провайдер відповів: ${error.message}` });
       }
     }
@@ -259,7 +270,7 @@ export function createCabinet(ctx) {
       const provider = wanted || settings.ai?.provider;
       try {
         return json(200, await generateRow({
-          provider, key: settings.ai?.keys?.[provider], model: settings.ai?.models?.[provider], idea, kind, count,
+          provider, key: settings.ai?.keys?.[provider], model: settings.ai?.models?.[provider], idea, kind, count, bases: settings.ai?.bases,
         }));
       } catch (error) {
         return json(502, { error: error.message });

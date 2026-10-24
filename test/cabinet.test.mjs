@@ -22,9 +22,14 @@ async function listen(handler) {
 // Fake Groq / Gemini / TMDB: the model proposes two real titles and one invented one.
 async function fakes(t) {
   const seen = [];
-  const { server, base } = await listen((req, res) => {
+  const bodies = [];
+  let throttled = false;
+  const { server, base } = await listen(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     seen.push(`${req.method} ${url.pathname}`);
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (raw) bodies.push({ path: url.pathname, auth: req.headers.authorization || '', body: JSON.parse(raw) });
     const send = (v) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v)); };
     const proposal = JSON.stringify({ items: [
       { original_title: 'Real Movie', year: 2020, type: 'movie' },
@@ -32,8 +37,13 @@ async function fakes(t) {
       { original_title: 'Real Show', year: 2019, type: 'tv' },
       { original_title: 'Lookalike', year: 2018, type: 'movie' },
     ] });
-    if (url.pathname === '/groq/models') return send({ data: [{ id: 'model-b' }, { id: 'model-a' }] });
-    if (url.pathname === '/groq/chat/completions') return send({ choices: [{ message: { content: proposal } }] });
+    if (/^\/(groq|openrouter|ollama)\/models$/.test(url.pathname)) return send({ data: [{ id: 'model-b' }, { id: 'model-a' }, { id: 'x/free-one:free' }] });
+    if (url.pathname === '/throttled/chat/completions' && !throttled) {
+      throttled = true;
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '0' });
+      return res.end(JSON.stringify({ error: { message: 'Rate limit reached. Please try again in 50ms.' } }));
+    }
+    if (/^\/(groq|openrouter|ollama|throttled)\/chat\/completions$/.test(url.pathname)) return send({ choices: [{ message: { content: proposal } }] });
     if (url.pathname === '/gemini/models') return send({ models: [{ name: 'models/g-1', supportedGenerationMethods: ['generateContent'] }] });
     if (url.pathname.startsWith('/gemini/models/') && url.pathname.endsWith(':generateContent')) {
       return send({ candidates: [{ content: { parts: [{ text: proposal }] } }] });
@@ -50,7 +60,7 @@ async function fakes(t) {
     res.writeHead(404); res.end();
   });
   t.after(() => server.close());
-  return { base, seen };
+  return { base, seen, bodies };
 }
 
 async function launch(t, fake, extraEnv = {}) {
@@ -64,7 +74,7 @@ async function launch(t, fake, extraEnv = {}) {
     env: {
       ...process.env, HOST: '127.0.0.1', PORT: String(port), MCP_TOKEN: token, MCP_ENABLE_WRITES: 'false',
       COLLECTIONS_FILE: path.join(dir, 'collections.json'), LAMPAC_URL: '',
-      GROQ_BASE: `${fake.base}/groq`, GEMINI_BASE: `${fake.base}/gemini`, TMDB_BASE: `${fake.base}/tmdb`, TMDB_API_KEY: 'k',
+      GROQ_BASE: `${fake.base}/groq`, GEMINI_BASE: `${fake.base}/gemini`, OPENROUTER_BASE: `${fake.base}/openrouter`, TMDB_BASE: `${fake.base}/tmdb`, TMDB_API_KEY: 'k',
       CABINET_ADMIN_PASSWORD: '', CABINET_HOSTS: '', ...extraEnv,
     },
   });
@@ -132,11 +142,14 @@ test('cabinet: keys stay on the server, generation drops invented titles, rows s
   await unlock();
 
   const ai = await call('PUT', '/ai', { provider: 'groq', keys: { groq: 'secret-groq-key', gemini: 'secret-gemini-key' }, models: { groq: 'model-a', gemini: 'g-1' } });
-  assert.deepEqual(ai.body.keys, { gemini: true, groq: true });
+  assert.equal(ai.body.keys.gemini, true);
+  assert.equal(ai.body.keys.groq, true);
+  assert.equal(ai.body.keys.openrouter, false);
+  assert.equal(ai.body.info.ollama.editable_base, true);
   assert.equal(JSON.stringify(ai.body).includes('secret-'), false);
   assert.equal(JSON.stringify((await call('GET', '/ai')).body).includes('secret-'), false);
 
-  assert.deepEqual((await call('POST', '/ai/models', { provider: 'groq' })).body.models, ['model-a', 'model-b']);
+  assert.deepEqual((await call('POST', '/ai/models', { provider: 'groq' })).body.models, ['model-a', 'model-b', 'x/free-one:free']);
   assert.deepEqual((await call('POST', '/ai/models', { provider: 'gemini' })).body.models, ['g-1']);
 
   for (const provider of ['groq', 'gemini']) {
@@ -190,4 +203,42 @@ test('cabinet: CABINET_HOSTS rejects other Host headers; CABINET_ADMIN_PASSWORD 
   assert.equal(await login('admin'), 401);
   assert.equal(await login('preset-password'), 200);
   assert.ok(call);
+});
+
+test('cabinet: OpenAI-compatible presets, Ollama without a key, retry after 429, output limits', async (t) => {
+  const fake = await fakes(t);
+  const { call, unlock } = await launch(t, fake);
+  await unlock();
+
+  // OpenRouter: fixed address, key required
+  await call('PUT', '/ai', { keys: { openrouter: 'or-key' }, models: { openrouter: 'x/free-one:free' } });
+  let gen = await call('POST', '/generate', { idea: 'films', kind: 'movies', count: 5, provider: 'openrouter' });
+  assert.equal(gen.status, 200, JSON.stringify(gen.body));
+  assert.equal(gen.body.items.length, 2);
+  const orBody = fake.bodies.find((b) => b.path === '/openrouter/chat/completions');
+  assert.equal(orBody.auth, 'Bearer or-key');
+  assert.equal(orBody.body.max_tokens, 2048);
+
+  // Ollama: no key, address from the cabinet, validated
+  assert.equal((await call('PUT', '/ai', { bases: { ollama: 'ftp://nope' } })).status, 400);
+  assert.equal((await call('POST', '/ai/models', { provider: 'ollama' })).status, 502);
+  await call('PUT', '/ai', { bases: { ollama: `${fake.base}/ollama/` }, models: { ollama: 'model-a' } });
+  assert.deepEqual((await call('POST', '/ai/models', { provider: 'ollama' })).body.models, ['model-a', 'model-b', 'x/free-one:free']);
+  gen = await call('POST', '/generate', { idea: 'films', kind: 'movies', count: 5, provider: 'ollama' });
+  assert.equal(gen.status, 200, JSON.stringify(gen.body));
+  assert.equal(fake.bodies.find((b) => b.path === '/ollama/chat/completions').auth, '');
+
+  // custom provider that answers 429 once: one retry after the wait the server asked for
+  await call('PUT', '/ai', { bases: { custom: `${fake.base}/throttled` }, models: { custom: 'm' } });
+  gen = await call('POST', '/generate', { idea: 'films', kind: 'movies', count: 5, provider: 'custom' });
+  assert.equal(gen.status, 200, JSON.stringify(gen.body));
+  assert.equal(fake.bodies.filter((b) => b.path === '/throttled/chat/completions').length, 2);
+
+  // Groq: max_completion_tokens, and low reasoning for gpt-oss models
+  await call('PUT', '/ai', { keys: { groq: 'gk' }, models: { groq: 'openai/gpt-oss-120b' } });
+  await call('POST', '/generate', { idea: 'films', kind: 'movies', count: 5, provider: 'groq' });
+  const groqBody = fake.bodies.filter((b) => b.path === '/groq/chat/completions').pop().body;
+  assert.equal(groqBody.max_completion_tokens, 2048);
+  assert.equal(groqBody.reasoning_effort, 'low');
+  assert.equal(groqBody.max_tokens, undefined);
 });

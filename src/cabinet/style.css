@@ -142,3 +142,7 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
 .fl > .noflex { flex: 0 0 auto; min-width: 0; }
 .ni:disabled { opacity: .4; cursor: default; background: none; }
 label.f > .inp { margin-top: 4px; font-size: 13px; }
+.mb { margin-bottom: 12px; }
+label.chk { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--mut); margin: -4px 0 10px; }
+.tabs { flex-wrap: wrap; }
+.tabs button { flex: 1 1 auto; }

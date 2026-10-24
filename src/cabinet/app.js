@@ -2,7 +2,7 @@
 
 const KIND = { movies: 'Фільми', series: 'Серіали', cartoons: 'Мультфільми', anime: 'Аніме' };
 const STYLE = { poster: 'вертикальні', wide: 'широкі' };
-const PROVIDER = { gemini: 'Gemini', groq: 'Groq' };
+const providerLabel = (id) => (state.ai && state.ai.info[id] ? state.ai.info[id].label : id);
 
 const state = { me: null, config: { img_base: 'https://image.tmdb.org/t/p/' }, rows: [], ai: null, view: 'home', preview: null, aiTab: null, edit: null, regen: {} };
 const $ = (id) => document.getElementById(id);
@@ -90,12 +90,15 @@ async function refresh() {
   const ready = aiReady();
   const status = $('status');
   status.className = `st hide-s ${ready ? '' : 'w'}`;
-  status.querySelector('span').textContent = ready ? `${PROVIDER[ai.provider]} готовий` : 'ШІ не налаштовано';
+  status.querySelector('span').textContent = ready ? `${providerLabel(ai.provider)} готовий` : 'ШІ не налаштовано';
 }
 
 function aiReady() {
   const ai = state.ai;
-  return Boolean(ai && ai.provider && ai.keys[ai.provider] && ai.models[ai.provider]);
+  if (!ai || !ai.provider || !ai.models[ai.provider]) return false;
+  const info = ai.info[ai.provider];
+  if (info.key_required && !ai.keys[ai.provider]) return false;
+  return !info.editable_base || Boolean(ai.bases[ai.provider]);
 }
 
 function tick() {
@@ -174,7 +177,7 @@ function viewHome() {
   const ai = state.ai;
   const chips = [
     `<div><i></i>${state.rows.length} рядів · ${cards} карток</div>`,
-    `<div><i class="${aiReady() ? '' : 'w'}"></i>${aiReady() ? `${esc(PROVIDER[ai.provider])}: ${esc(ai.models[ai.provider])}` : 'ШІ не налаштовано'}</div>`,
+    `<div><i class="${aiReady() ? '' : 'w'}"></i>${aiReady() ? `${esc(providerLabel(ai.provider))}: ${esc(ai.models[ai.provider])}` : 'ШІ не налаштовано'}</div>`,
   ].join('');
   const date = new Date().toLocaleDateString('uk-UA', { day: 'numeric', month: 'long', year: 'numeric' });
   main().innerHTML = `
@@ -256,7 +259,7 @@ function viewIdea() {
           <div><label class="f" for="idea-count">Скільки</label><input class="inp" id="idea-count" type="number" min="5" max="30" value="${p ? p.count : 15}"></div>
         </div>
         <label class="f" for="idea-provider">Провайдер</label>
-        <select class="inp" id="idea-provider">${options(PROVIDER, ai.provider)}</select>
+        <select class="inp" id="idea-provider">${options(Object.fromEntries(ai.providers.map((id) => [id, ai.info[id].label])), ai.provider)}</select>
         <button class="btn pri" data-act="generate">Згенерувати</button>
         <div class="msg" id="idea-msg"></div>
       </div>
@@ -278,18 +281,37 @@ function viewIdea() {
     </div>`;
 }
 
+const PROVIDER_NOTES = {
+  gemini: 'Ключ — Google AI Studio. Безплатні моделі Flash / Flash-Lite.',
+  groq: 'Ключ — Groq console. На безплатному рівні моделі обмежені кількістю токенів на хвилину.',
+  openrouter: 'Ключ — openrouter.ai. Безплатні моделі мають суфікс «:free» (без покупки кредитів — 50 запитів на день).',
+  mistral: 'Ключ — Mistral console.',
+  ollama: 'Ваша локальна модель: ідеї нікуди не йдуть. Ключ не потрібен. Адреса — сервер Ollama з /v1 у кінці.',
+  custom: 'Будь-який сервер з OpenAI-сумісним API (chat/completions). Ключ — якщо сервер його вимагає.',
+};
+
 function viewAi() {
   const ai = state.ai;
-  const tab = state.aiTab || ai.provider || 'groq';
+  const tab = state.aiTab || ai.provider || 'gemini';
   state.aiTab = tab;
+  const info = ai.info[tab];
   const key = ai.keys[tab];
   const model = ai.models[tab] || '';
+  const base = ai.bases[tab] || '';
+  const canList = info.editable_base ? Boolean(base) : (key || !info.key_required);
   main().innerHTML = `
     ${hero('<span>ШІ-провайдер</span>', 'Ключі зберігаються лише на сервері й назад у браузер не віддаються.')}
     <div class="grid">
-      <div class="blk c7">
-        <div class="tabs">${Object.entries(PROVIDER).map(([id, label]) => `<button data-act="ai-tab" data-p="${id}" class="${id === tab ? 'on' : ''}">${label}${ai.provider === id ? ' · основний' : ''}</button>`).join('')}</div>
-        <label class="f" for="ai-key">API-ключ ${key ? '(задано — введіть новий, щоб замінити)' : '(не задано)'}</label>
+      <div class="blk c8">
+        <div class="tabs">${ai.providers.map((id) => `<button data-act="ai-tab" data-p="${id}" class="${id === tab ? 'on' : ''}">${esc(ai.info[id].label)}${ai.provider === id ? ' · основний' : ''}</button>`).join('')}</div>
+        <div class="mut mb">${esc(PROVIDER_NOTES[tab] || '')}</div>
+        ${info.editable_base ? `
+          <label class="f" for="ai-base">Адреса API</label>
+          <input class="inp" id="ai-base" value="${esc(base)}" placeholder="${esc(info.example)}">
+          <button class="btn pri" data-act="ai-save-base">Зберегти адресу</button>
+          <div class="msg" id="ai-base-msg"></div>
+          <hr class="sep">` : ''}
+        <label class="f" for="ai-key">API-ключ${info.key_required ? '' : ' (необов’язково)'} ${key ? '— задано, введіть новий, щоб замінити' : '— не задано'}</label>
         <input class="inp" id="ai-key" type="password" autocomplete="off" placeholder="${key ? '••••••••' : 'вставте ключ'}">
         <button class="btn pri" data-act="ai-save-key">Зберегти ключ</button>
         ${key ? '<button class="btn bad" data-act="ai-clear-key">Видалити ключ</button>' : ''}
@@ -298,16 +320,18 @@ function viewAi() {
         <label class="f" for="ai-model">Модель</label>
         <div class="fl">
           <div><input class="inp" id="ai-model" list="ai-models" value="${esc(model)}" placeholder="оберіть зі списку або впишіть"><datalist id="ai-models"></datalist></div>
-          <div class="noflex"><button class="btn" data-act="ai-models" ${key ? '' : 'disabled'}>Завантажити список</button></div>
+          <div class="noflex"><button class="btn" data-act="ai-models" ${canList ? '' : 'disabled'}>Завантажити список</button></div>
         </div>
+        ${tab === 'openrouter' ? '<label class="chk"><input type="checkbox" id="ai-free" checked> лише безплатні (:free)</label>' : ''}
         <button class="btn pri" data-act="ai-save-model">Зберегти модель</button>
-        ${ai.provider === tab ? '' : `<button class="btn" data-act="ai-main">Зробити ${PROVIDER[tab]} основним</button>`}
+        ${ai.provider === tab ? '' : `<button class="btn" data-act="ai-main">Зробити ${esc(info.label)} основним</button>`}
         <div class="msg" id="ai-model-msg"></div>
       </div>
-      <div class="blk c5">
+      <div class="blk c4">
         <div class="bh"><span class="bi">ⓘ</span><b>Як це працює</b></div>
-        <div class="mut">Ідея ряду й назви тайтлів ідуть до обраного провайдера (Google або Groq). Більше нічого: ні історії переглядів, ні даних пристроїв.<br><br>
-        Безплатних лімітів з запасом вистачає: один ряд — один запит. Точні ліміти — у кабінеті провайдера (Google AI Studio, Groq console).</div>
+        <div class="mut">До провайдера йдуть лише ідея ряду й назви тайтлів. Ні історії переглядів, ні даних пристроїв.<br><br>
+        Один ряд — один запит до ШІ. Точні безплатні ліміти — у кабінеті самого провайдера.<br><br>
+        Ollama на власному сервері не відправляє нічого назовні.</div>
       </div>
     </div>`;
 }
@@ -526,7 +550,7 @@ const actions = {
     message($('ai-key-msg'), 'Ключ збережено.', true);
   },
   async 'ai-clear-key'() {
-    if (!confirm(`Видалити ключ ${PROVIDER[state.aiTab]}?`)) return;
+    if (!confirm(`Видалити ключ ${providerLabel(state.aiTab)}?`)) return;
     state.ai = await api('PUT', '/ai', { keys: { [state.aiTab]: '' } });
     await refresh();
     viewAi();
@@ -536,8 +560,10 @@ const actions = {
     message($('ai-model-msg'), 'Питаю провайдера…', true);
     try {
       const { models } = await api('POST', '/ai/models', { provider: state.aiTab });
-      $('ai-models').innerHTML = models.map((m) => `<option value="${esc(m)}">`).join('');
-      message($('ai-model-msg'), `Ключ працює. Моделей: ${models.length} — оберіть у полі «Модель».`, true);
+      const free = $('ai-free') && $('ai-free').checked;
+      const shown = free ? models.filter((m) => /:free$/.test(m)) : models;
+      $('ai-models').innerHTML = shown.map((m) => `<option value="${esc(m)}">`).join('');
+      message($('ai-model-msg'), `Провайдер відповів. Моделей: ${shown.length}${free ? ' безплатних' : ''} — оберіть у полі «Модель».`, true);
     } catch (error) { message($('ai-model-msg'), error.message, false); }
     el.disabled = false;
   },
@@ -548,6 +574,14 @@ const actions = {
     await refresh();
     viewAi();
     message($('ai-model-msg'), 'Модель збережено.', true);
+  },
+  async 'ai-save-base'() {
+    try {
+      state.ai = await api('PUT', '/ai', { bases: { [state.aiTab]: $('ai-base').value.trim() } });
+      await refresh();
+      viewAi();
+      message($('ai-base-msg'), 'Адресу збережено.', true);
+    } catch (error) { message($('ai-base-msg'), error.message, false); }
   },
   async 'ai-main'() {
     state.ai = await api('PUT', '/ai', { provider: state.aiTab });
