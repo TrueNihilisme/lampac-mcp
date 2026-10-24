@@ -22,14 +22,34 @@ if (TOKEN.length < 32) {
 
 let dataLock = Promise.resolve();
 
-async function readCollection() {
+const ROW_KINDS = ['movies', 'series', 'cartoons', 'anime'];
+const ROW_STYLES = ['poster', 'wide'];
+const MAX_ROWS = 20;
+const ROW_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+// Stored shape: { updated_at, rows: [{ id, title, kind, style, updated_at, items }] }.
+// The first alpha stored a single { title, items } collection; it is read as one wide row.
+async function readRows() {
   try {
     const parsed = JSON.parse(await fs.readFile(COLLECTION_FILE, 'utf8'));
-    if (parsed && typeof parsed.title === 'string' && Array.isArray(parsed.items)) return parsed;
+    if (parsed && Array.isArray(parsed.rows)) return parsed;
+    if (parsed && typeof parsed.title === 'string' && Array.isArray(parsed.items)) {
+      return {
+        updated_at: parsed.updated_at,
+        rows: [{ id: 'ai-picks', title: parsed.title, kind: 'anime', style: 'wide', updated_at: parsed.updated_at, items: parsed.items }],
+      };
+    }
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  return { title: 'AI picks', items: [] };
+  return { rows: [] };
+}
+
+// Feed for the Lampa plugin: all rows, plus the first row as { title, items } for older plugin builds.
+async function readFeed() {
+  const data = await readRows();
+  const first = data.rows[0] || { title: 'AI picks', items: [] };
+  return { title: first.title, items: first.items, rows: data.rows, updated_at: data.updated_at };
 }
 
 async function saveCollection(collection) {
@@ -91,21 +111,27 @@ async function readBody(req) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+const APPROVAL = 'I have reviewed and approve changing the AI rows.';
+
 const tools = [
   {
-    name: 'get_ai_collection',
-    description: 'Read the current AI-managed carousel collection shown by the Lampa plugin.',
+    name: 'get_ai_rows',
+    description: 'Read the AI-managed rows shown on the Lampa main screen, in display order.',
     inputSchema: { type: 'object', additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
   {
-    name: 'replace_ai_collection',
-    description: 'Replace the AI carousel title and all its TMDB cards. Requires writes enabled by the operator and an explicit approval phrase. Use only with an MCP client configured to ask the human before this tool runs.',
+    name: 'set_ai_row',
+    description: 'Create or replace one main-screen row (by id) with its title, kind, card style and TMDB cards. `position` (0-based) moves the row; without it a new row is appended and an existing row keeps its place. Requires writes enabled by the operator and an explicit approval phrase. Use only with an MCP client configured to ask the human before this tool runs.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
+        id: { type: 'string', pattern: ROW_ID.source },
         title: { type: 'string', minLength: 1, maxLength: 100 },
+        kind: { type: 'string', enum: ROW_KINDS },
+        style: { type: 'string', enum: ROW_STYLES },
+        position: { type: 'integer', minimum: 0, maximum: MAX_ROWS - 1 },
         items: {
           type: 'array', maxItems: 100,
           items: {
@@ -125,9 +151,23 @@ const tools = [
             required: ['id', 'media_type', 'title'],
           },
         },
-        approval_phrase: { type: 'string', const: 'I have reviewed and approve replacing the AI collection.' },
+        approval_phrase: { type: 'string', const: APPROVAL },
       },
-      required: ['title', 'items', 'approval_phrase'],
+      required: ['id', 'title', 'kind', 'style', 'items', 'approval_phrase'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true },
+  },
+  {
+    name: 'delete_ai_row',
+    description: 'Remove one main-screen row by id. Requires writes enabled by the operator and an explicit approval phrase.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', pattern: ROW_ID.source },
+        approval_phrase: { type: 'string', const: APPROVAL },
+      },
+      required: ['id', 'approval_phrase'],
     },
     annotations: { readOnlyHint: false, destructiveHint: true },
   },
@@ -231,17 +271,9 @@ async function getTvctlLog(last = 50) {
   }
 }
 
-async function callTool(name, args) {
-  if (name === 'get_ai_collection') return resultText(await readCollection());
-  if (name === 'replace_ai_collection') {
-    if (!WRITE_ENABLED) throw new Error('Writes are disabled. Set MCP_ENABLE_WRITES=true after configuring human approval in the MCP client.');
-    if (args.approval_phrase !== 'I have reviewed and approve replacing the AI collection.') throw new Error('The required approval phrase is missing.');
-    if (typeof args.title !== 'string' || !args.title.trim() || args.title.length > 100 || !Array.isArray(args.items) || args.items.length > 100) {
-      throw new Error('Provide a title and an array of at most 100 cards.');
-    }
-    if (Object.keys(args).some((key) => !['title', 'items', 'approval_phrase'].includes(key))) throw new Error('Unexpected collection field.');
-    const ids = new Set();
-    const items = args.items.map((item) => {
+function normalizeItems(list) {
+  const ids = new Set();
+  return list.map((item) => {
       if (!item || !Number.isSafeInteger(item.id) || item.id < 1 || !['movie', 'tv'].includes(item.media_type) ||
           typeof item.title !== 'string' || !item.title.trim() || item.title.length > 300) {
         throw new Error('Each card needs a positive integer id, media_type movie/tv, and non-empty title.');
@@ -265,11 +297,46 @@ async function callTool(name, args) {
       for (const field of Object.keys(limits)) if (item[field] !== undefined) clean[field] = item[field];
       if (item.vote_average !== undefined) clean.vote_average = item.vote_average;
       return clean;
-    });
-    const collection = { title: args.title.trim(), updated_at: new Date().toISOString(), items };
-    if (!collection.title) throw new Error('Collection title cannot be empty.');
-    await saveCollection(collection);
-    return resultText({ ok: true, title: collection.title, items: items.length });
+  });
+}
+
+function requireWrite(args, allowed) {
+  if (!WRITE_ENABLED) throw new Error('Writes are disabled. Set MCP_ENABLE_WRITES=true after configuring human approval in the MCP client.');
+  if (args.approval_phrase !== APPROVAL) throw new Error('The required approval phrase is missing.');
+  if (Object.keys(args).some((key) => !allowed.includes(key))) throw new Error('Unexpected row field.');
+  if (typeof args.id !== 'string' || !ROW_ID.test(args.id)) throw new Error('Row id: lowercase letters, digits and dashes, up to 40 characters.');
+}
+
+async function callTool(name, args) {
+  if (name === 'get_ai_rows') return resultText(await readRows());
+  if (name === 'set_ai_row') {
+    requireWrite(args, ['id', 'title', 'kind', 'style', 'position', 'items', 'approval_phrase']);
+    if (typeof args.title !== 'string' || !args.title.trim() || args.title.length > 100) throw new Error('Provide a row title of at most 100 characters.');
+    if (!ROW_KINDS.includes(args.kind)) throw new Error(`kind must be one of: ${ROW_KINDS.join(', ')}.`);
+    if (!ROW_STYLES.includes(args.style)) throw new Error(`style must be one of: ${ROW_STYLES.join(', ')}.`);
+    if (!Array.isArray(args.items) || args.items.length > 100) throw new Error('Provide an array of at most 100 cards.');
+    if (args.position !== undefined && (!Number.isInteger(args.position) || args.position < 0 || args.position >= MAX_ROWS)) {
+      throw new Error(`position must be an integer from 0 to ${MAX_ROWS - 1}.`);
+    }
+    const now = new Date().toISOString();
+    const row = { id: args.id, title: args.title.trim(), kind: args.kind, style: args.style, updated_at: now, items: normalizeItems(args.items) };
+    const data = await readRows();
+    const rows = data.rows.slice();
+    const index = rows.findIndex((r) => r.id === row.id);
+    if (index === -1 && rows.length >= MAX_ROWS) throw new Error(`At most ${MAX_ROWS} rows.`);
+    if (index !== -1) rows.splice(index, 1);
+    const at = args.position !== undefined ? Math.min(args.position, rows.length) : (index !== -1 ? index : rows.length);
+    rows.splice(at, 0, row);
+    await saveCollection({ updated_at: now, rows });
+    return resultText({ ok: true, id: row.id, position: at, items: row.items.length, rows: rows.length });
+  }
+  if (name === 'delete_ai_row') {
+    requireWrite(args, ['id', 'approval_phrase']);
+    const data = await readRows();
+    const rows = data.rows.filter((r) => r.id !== args.id);
+    if (rows.length === data.rows.length) throw new Error(`No row with id ${args.id}.`);
+    await saveCollection({ updated_at: new Date().toISOString(), rows });
+    return resultText({ ok: true, id: args.id, rows: rows.length });
   }
   if (name === 'inspect_title_sources') return resultText(await diagnoseTitle(args));
   if (name === 'get_tvctl_log') {
@@ -379,7 +446,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith(CUB_PREFIX)) return await handleCub(req, res, url);
     if (req.method === 'GET' && url.pathname === '/api/cub-log') return sendJson(res, 200, { requests: cubLog });
     if (req.method === 'GET' && url.pathname === '/api/collection') {
-      return sendJson(res, 200, await readCollection(), { 'Access-Control-Allow-Origin': '*' });
+      return sendJson(res, 200, await readFeed(), { 'Access-Control-Allow-Origin': '*' });
     }
     if (req.method === 'GET' && url.pathname === '/plugin.js') {
       const script = await fs.readFile(path.join(ROOT, 'plugin', 'lampac-mcp.js'));
