@@ -5,6 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCabinet } from './cabinet.mjs';
+import { createTmdbProxy, TMDB_PREFIX } from './tmdb-proxy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -457,6 +458,12 @@ const cabinet = createCabinet({
   readRows, setRow, deleteRow, readBody, sendJson, sendText, saveRows: saveCollection,
 });
 
+// TMDB for TV front-ends (Glint): the same base and key the row generator uses (see ai.mjs)
+const tmdbProxy = createTmdbProxy({
+  base: process.env.TMDB_BASE || (process.env.LAMPAC_URL ? `${process.env.LAMPAC_URL.replace(/\/+$/, '')}/tmdb/api/3` : 'https://api.themoviedb.org/3'),
+  key: process.env.TMDB_API_KEY || '',
+});
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost');
   try {
@@ -464,6 +471,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/cabinet' || url.pathname.startsWith('/cabinet/')) return await cabinet.handle(req, res, url);
     if (url.pathname === MCP_PATH) return await handleMcp(req, res);
     if (url.pathname.startsWith(CUB_PREFIX)) return await handleCub(req, res, url);
+    if (url.pathname.startsWith(TMDB_PREFIX + '/')) return await tmdbProxy(req, res, url, sendJson, sendText);
     if (req.method === 'GET' && url.pathname === '/api/cub-log') return sendJson(res, 200, { requests: cubLog });
     if (req.method === 'GET' && url.pathname === '/api/collection') {
       return sendJson(res, 200, await readFeed(), { 'Access-Control-Allow-Origin': '*' });

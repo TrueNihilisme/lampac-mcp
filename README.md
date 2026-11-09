@@ -22,6 +22,8 @@ Rows are stored by this service as JSON. It does not write to CUB, Lampac `catal
 - `get_tvctl_log` — optionally read the latest reports from `EX.TvCtl`; it sends no commands to a device.
 - `GET /api/collection` — read-only feed for the Lampa plugin: `rows`, plus the first row as `title`/`items`
   for older plugin builds.
+- `GET /api/tmdb/<path>` — read-only TMDB for TV front-ends (e.g. Glint): the server adds its `TMDB_API_KEY`, so the key
+  never reaches the TV; only list/title/season/person/search paths, answers cached for 30 minutes, CORS `*`.
 - `/cub/*` — local CUB stand-in (see below) and `GET /api/cub-log` with the last requested paths.
 - `plugin/lampac-mcp.js` — Lampa 3 plugin that builds the main screen from the rows.
 - `/cabinet` — web cabinet (Ukrainian UI): rows (order, edit, delete, regenerate from the stored idea),
