@@ -169,6 +169,18 @@ route and returns at most 200 lines. Do not put the password in source control, 
   Authentication is bearer-token based.
 - Use trusted MCP clients. Tool metadata and server-side phrases cannot replace the host's approval UI.
 
+## Support
+
+If this project is useful to you, you can support its development with a crypto donation:
+
+| Network | Address |
+|---|---|
+| Bitcoin (BTC) | `bc1q0sw0w9mqtghrxfyyqw834sjs7t7rr7futulgv4` |
+| Ethereum (ETH) | `0xAb3a04a4b52547a7f8B00abb0088D3d9d11CA461` |
+| Solana (SOL) | `2QBoKrUaiAcAKxNJ7o9oe9Q16ptjLQohR8KyPX2tpJhZ` |
+
+Send each coin only on the network named in its row: a transfer made on another network cannot be recovered.
+
 ## License
 
 GNU Affero General Public License v3.0 only. See [LICENSE](LICENSE).
